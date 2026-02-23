@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         视频选择器+直链批量提取器
 // @namespace    http://tampermonkey.net/
-// @version      3.1
-// @description  视频选择 + 批量提取指定分辨率直链，修复面板穿透，支持实时进度显示
+// @version      3.2
+// @description  视频选择 + 批量提取指定分辨率直链，修复面板穿透，支持实时进度显示，支持时长统计和大小估算
 // @author       You
-// @include      https://*.hanime*.*/search?*
-// @include      https://hanime*.*/search?*
+// @include      https://*.hanime*.*/search*
+// @include      https://hanime*.*/search*
 // @grant        GM_xmlhttpRequest
 // @connect      hanime1.me
 // @connect      hanime2.top
@@ -92,7 +92,7 @@
             z-index: 10001;
             box-shadow: 0 5px 20px rgba(0,0,0,0.5);
             font-family: Arial, sans-serif;
-            min-width: 300px;
+            min-width: 320px;
             max-width: 380px;        /* 添加最大宽度限制 */
             transform: translateX(400px);
             transition: transform 0.3s ease;
@@ -187,6 +187,36 @@
         #selectorPanel .close-btn:hover {
             color: white;
             background: transparent;
+        }
+
+        /* 统计信息区域 */
+        .stats-section {
+            margin: 10px 0;
+            padding: 10px;
+            background: #2a2a2a;
+            border-radius: 6px;
+            border-left: 3px solid #e63946;
+        }
+        .stats-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 5px 0;
+            font-size: 13px;
+        }
+        .stats-row .label {
+            color: #aaa;
+        }
+        .stats-row .value {
+            color: #e63946;
+            font-weight: bold;
+        }
+        .stats-row .value.success {
+            color: #28a745;
+        }
+        .stats-divider {
+            height: 1px;
+            background: #444;
+            margin: 8px 0;
         }
 
         /* 直链提取区域样式 */
@@ -437,6 +467,28 @@
             已选中 <span class="selected-count" id="selectedCount">0</span> 个视频
         </div>
 
+        <!-- 新增：时长统计和大小估算区域 -->
+        <div class="stats-section" id="durationStats">
+            <div class="stats-row">
+                <span class="label">⏱️ 总时长:</span>
+                <span class="value" id="totalDuration">00:00:00</span>
+            </div>
+            <div class="stats-row">
+                <span class="label">⚙️ 码率设置:</span>
+                <span class="value">
+                    <input type="number" id="bitrateInput" value="3000" min="100" max="10000" step="100" style="width: 70px; background: #333; color: white; border: 1px solid #444; border-radius: 3px; padding: 2px 5px;"> kbps
+                </span>
+            </div>
+            <div class="stats-row">
+                <span class="label">💾 估算大小:</span>
+                <span class="value success" id="estimatedSize">0 MB</span>
+            </div>
+            <div class="stats-row">
+                <span class="label">📊 平均每集:</span>
+                <span class="value" id="avgSizePerVideo">0 MB</span>
+            </div>
+        </div>
+
         <button id="selectAllBtn" class="full-width">全选当前页</button>
         <button id="unselectAllBtn" class="full-width">取消全选</button>
 
@@ -482,7 +534,7 @@
         </div>
 
         <div class="key-hint" style="font-size: 12px; color: #888; margin-top: 8px; padding-top: 8px; border-top: 1px solid #333; text-align: center;">
-            <span>拖动</span> 框选 · <span>Ctrl+拖动</span> 追加 · <span>Shift+点击</span> 区间 · <span>ESC</span> 退出
+            <span>拖动</span> 框选 · <span>Ctrl+拖动</span> 范围反选 · <span>Shift+点击</span> 区间 · <span>ESC</span> 退出
         </div>
     `;
     document.body.appendChild(panel);
@@ -501,7 +553,7 @@
     hint.style.display = 'none';
     hint.innerHTML = `
         🖱️ <span class="key-highlight">拖动</span> 框选 ·
-        <span class="key-highlight">Ctrl+拖动</span> 追加 ·
+        <span class="key-highlight">Ctrl+拖动</span> 范围反选 ·
         <span class="key-highlight">Shift+点击</span> 区间 ·
         <span class="key-highlight">ESC</span> 退出
     `;
@@ -568,7 +620,101 @@
     function updateSelectedCount() {
         const count = document.querySelectorAll('.video-item-container.selected').length;
         document.getElementById('selectedCount').textContent = count;
+
+        // 同时更新时长统计和大小估算
+        updateDurationStats();
     }
+
+    // ==================== 新增：时长统计和大小估算功能 ====================
+
+    // 解析时长字符串（格式：MM:SS 或 HH:MM:SS）
+    function parseDuration(durationStr) {
+        if (!durationStr) return 0;
+
+        const parts = durationStr.trim().split(':').map(Number);
+        if (parts.length === 2) {
+            // MM:SS
+            return parts[0] * 60 + parts[1];
+        } else if (parts.length === 3) {
+            // HH:MM:SS
+            return parts[0] * 3600 + parts[1] * 60 + parts[2];
+        }
+        return 0;
+    }
+
+    // 格式化秒数为 HH:MM:SS
+    function formatDuration(seconds) {
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        const secs = seconds % 60;
+
+        if (hours > 0) {
+            return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        } else {
+            return `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        }
+    }
+
+    // 格式化文件大小
+    function formatFileSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
+        if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+        return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+    }
+
+    // 计算文件大小（基于时长和码率）
+    function calculateFileSize(durationSeconds, bitrateKbps) {
+        // 文件大小（字节）= 时长（秒）× 码率（千比特/秒）× 1000 / 8
+        return durationSeconds * bitrateKbps * 1000 / 8;
+    }
+
+    // 获取选中视频的总时长
+    function getSelectedTotalDuration() {
+        const selectedItems = document.querySelectorAll('.video-item-container.selected');
+        let totalSeconds = 0;
+
+        selectedItems.forEach(item => {
+            const durationElement = item.querySelector('.duration');
+            if (durationElement) {
+                totalSeconds += parseDuration(durationElement.textContent);
+            }
+        });
+
+        return totalSeconds;
+    }
+
+    // 更新时长统计和大小估算
+    function updateDurationStats() {
+        const totalSeconds = getSelectedTotalDuration();
+        const selectedCount = document.querySelectorAll('.video-item-container.selected').length;
+
+        // 更新总时长显示
+        document.getElementById('totalDuration').textContent = formatDuration(totalSeconds);
+
+        // 获取码率输入值
+        const bitrateInput = document.getElementById('bitrateInput');
+        const bitrateKbps = parseInt(bitrateInput.value) || 3000;
+
+        // 计算总大小
+        const totalBytes = calculateFileSize(totalSeconds, bitrateKbps);
+        document.getElementById('estimatedSize').textContent = formatFileSize(totalBytes);
+
+        // 计算平均每集大小
+        if (selectedCount > 0) {
+            const avgBytes = totalBytes / selectedCount;
+            document.getElementById('avgSizePerVideo').textContent = formatFileSize(avgBytes);
+        } else {
+            document.getElementById('avgSizePerVideo').textContent = '0 MB';
+        }
+
+        // 可选：添加日志
+        if (selectedCount > 0 && totalSeconds > 0) {
+            addLog(`统计: ${selectedCount}个视频, 总时长 ${formatDuration(totalSeconds)}, 估算大小 ${formatFileSize(totalBytes)}`, 'info');
+        }
+    }
+
+    // ==================== 原有功能函数 ====================
 
     // 获取选中的视频链接
     function getSelectedVideoLinks() {
@@ -579,13 +725,15 @@
             const linkElement = item.querySelector('a.video-link');
             const titleElement = item.querySelector('.title');
             const subtitleElement = item.querySelector('.subtitle a');
+            const durationElement = item.querySelector('.duration');
 
             if (linkElement) {
                 links.push({
                     originalUrl: linkElement.href,
                     title: titleElement ? titleElement.innerText.trim() : '未知标题',
                     author: subtitleElement ? subtitleElement.innerText.trim() : '未知作者',
-                    videoId: extractVideoId(linkElement.href)
+                    videoId: extractVideoId(linkElement.href),
+                    duration: durationElement ? durationElement.textContent.trim() : '00:00'
                 });
             }
         });
@@ -713,7 +861,7 @@
         });
     }
 
-    // ==================== 直链提取功能 (基于1.0的工作逻辑) ====================
+    // ==================== 直链提取功能 ====================
 
     // 从HTML中提取视频链接
     function extractVideoLinksFromHtml(html, url) {
@@ -882,6 +1030,7 @@
         }
         return null;
     }
+
     // 批量获取视频链接（带并发控制）
     async function batchFetchVideoLinks(items, preferredResolution) {
         const results = [];
@@ -1010,6 +1159,7 @@
                 title: item.title,
                 author: item.author,
                 videoId: item.videoId,
+                duration: item.duration,
                 originalUrl: item.originalUrl,
                 convertedUrl: item.newUrl,
                 videoUrl: item.videoUrl,
@@ -1212,6 +1362,12 @@
         exportResults();
     });
 
+    // 码率输入变化时更新估算大小
+    document.getElementById('bitrateInput').addEventListener('input', (e) => {
+        e.stopPropagation();
+        updateDurationStats();
+    });
+
     // 点击页面其他地方关闭面板
     document.addEventListener('click', (e) => {
         if (!panel.contains(e.target) && !toggleBtn.contains(e.target) && panel.classList.contains('show')) {
@@ -1220,5 +1376,5 @@
         }
     });
 
-    console.log('修复版视频选择器+直链提取器 v3.0 已加载');
+    console.log('修复版视频选择器+直链提取器 v3.2 已加载 (支持时长统计和大小估算)');
 })();
