@@ -1,14 +1,23 @@
 // ==UserScript==
 // @name         视频选择器+直链批量提取器
 // @namespace    http://tampermonkey.net/
-// @version      3.0
+// @version      3.1
 // @description  视频选择 + 批量提取指定分辨率直链，修复面板穿透，支持实时进度显示
 // @author       You
+// @include      https://*.hanime*.*/search?*
 // @include      https://hanime*.*/search?*
 // @grant        GM_xmlhttpRequest
-// @connect      www.hanime2.cc
 // @connect      hanime1.me
 // @connect      hanime2.top
+// @connect      www.hanime2.vip
+// @connect      www.hanime2.cc
+// @connect      www.hanime163.top/
+// @connect      www.hanime365.top
+// @connect      www.hanime1-me.top
+// @connect      www.hanime1.sbs
+// @connect      www.hanime2.top
+// @connect      www.hanime1-me.top
+// @connect      www.hanime1-me.cc
 // ==/UserScript==
 
 (function() {
@@ -34,7 +43,7 @@
 
     // 配置
     const CONFIG = {
-        resolutionPriority: ['2160p', '1080p', '720p', '480p', '360p'],
+        resolutionPriority: ['2160p', '1080p', '720p', '480p'],
         concurrency: 2,
         timeout: 15000
     };
@@ -84,12 +93,15 @@
             box-shadow: 0 5px 20px rgba(0,0,0,0.5);
             font-family: Arial, sans-serif;
             min-width: 300px;
+            max-width: 380px;        /* 添加最大宽度限制 */
             transform: translateX(400px);
             transition: transform 0.3s ease;
             border-left: 3px solid #e63946;
             max-height: 80vh;
             overflow-y: auto;
+            overflow-x: hidden;      /* 隐藏横向滚动条 */
             pointer-events: auto;
+            word-break: break-word;  /* 防止内容撑宽 */
         }
         #selectorPanel.show {
             transform: translateX(0);
@@ -240,8 +252,9 @@
             font-weight: bold;
         }
         .log-container {
-            max-height: 150px;
+            max-height: 100px;
             overflow-y: auto;
+            overflow-x: hidden;      /* 添加：隐藏横向滚动条 */
             background: #1a1a1a;
             border-radius: 4px;
             padding: 8px;
@@ -249,11 +262,20 @@
             font-family: monospace;
             margin-top: 10px;
             border: 1px solid #444;
+            word-break: break-all;   /* 添加：强制长单词换行 */
+            white-space: pre-wrap;    /* 添加：保留格式并允许换行 */
+            width: 100%;             /* 添加：确保不超过父容器 */
+            box-sizing: border-box;   /* 添加：padding包含在宽度内 */
         }
+        /* 日志条目样式 - 如果没有就新建，如果有就修改 */
         .log-item {
             padding: 2px 0;
             border-bottom: 1px solid #333;
             color: #0f0;
+            word-break: break-all;   /* 添加：强制长链接换行 */
+            white-space: pre-wrap;    /* 添加：允许换行 */
+            max-width: 100%;         /* 添加：不超过容器宽度 */
+            overflow-wrap: break-word; /* 添加：现代浏览器的换行属性 */
         }
         .log-item.success { color: #51cf66; }
         .log-item.error { color: #ff6b6b; }
@@ -434,7 +456,6 @@
                     <option value="1080p" selected>1080p</option>
                     <option value="720p">720p</option>
                     <option value="480p">480p</option>
-                    <option value="360p">360p</option>
                 </select>
             </div>
 
@@ -718,7 +739,6 @@
                 else if (resolution.includes('1080') || resolution.includes('1920x1080')) resolution = '1080p';
                 else if (resolution.includes('720') || resolution.includes('1280x720')) resolution = '720p';
                 else if (resolution.includes('480') || resolution.includes('854x480')) resolution = '480p';
-                else if (resolution.includes('360') || resolution.includes('640x360')) resolution = '360p';
 
                 videoLinks.push({
                     src: src,
@@ -786,13 +806,26 @@
                         url: item.newUrl,
                         timeout: CONFIG.timeout,
                         onload: resolve,
-                        onerror: reject,
-                        ontimeout: reject
+                        onerror: (err) => {
+                            // 处理权限错误
+                            if (err.error === 'NOT_ALLOWED' || (err.responseText && err.responseText.includes('not allowed'))) {
+                                reject(new Error(`⛔ 域名 ${new URL(item.newUrl).hostname} 未授权，请在Tampermonkey中允许访问该域名`));
+                            } else if (err.error === 'NETWORK_ERROR') {
+                                reject(new Error(`网络错误，请检查网络连接`));
+                            } else if (err.status === 0) {
+                                reject(new Error(`跨域请求被阻止，请确保域名 ${new URL(item.newUrl).hostname} 已添加到 @connect 或已被用户允许`));
+                            } else {
+                                reject(err);
+                            }
+                        },
+                        ontimeout: () => {
+                            reject(new Error(`请求超时 (${CONFIG.timeout}ms)`));
+                        }
                     });
                 });
 
                 if (response.status !== 200) {
-                    throw new Error(`HTTP ${response.status}`);
+                    throw new Error(`HTTP ${response.status} - ${response.statusText || '未知错误'}`);
                 }
 
                 const links = extractVideoLinksFromHtml(response.responseText, item.newUrl);
@@ -822,7 +855,20 @@
                 };
 
             } catch (error) {
-                addLog(`请求失败 (${attempt + 1}/${retryCount + 1}): ${item.title} - ${error.message}`, 'error');
+                // 更详细的错误日志
+                let errorMessage = error.message;
+
+                // 处理特定错误类型
+                if (errorMessage.includes('not allowed') || errorMessage.includes('未授权')) {
+                    addLog(`❌ 权限错误: ${errorMessage}`, 'error');
+                    // 提示用户如何解决
+                    addLog(`💡 提示: 如果这是新域名，请在Tampermonkey弹出的权限请求中选择"始终允许"`, 'warning');
+                } else if (errorMessage.includes('超时')) {
+                    addLog(`⏱️ 超时: ${item.title}`, 'error');
+                } else {
+                    addLog(`❌ 请求失败 (${attempt + 1}/${retryCount + 1}): ${item.title} - ${errorMessage}`, 'error');
+                }
+
                 if (attempt === retryCount) {
                     return {
                         ...item,
@@ -836,7 +882,6 @@
         }
         return null;
     }
-
     // 批量获取视频链接（带并发控制）
     async function batchFetchVideoLinks(items, preferredResolution) {
         const results = [];
