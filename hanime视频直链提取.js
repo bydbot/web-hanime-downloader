@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         视频选择器+直链批量提取器
 // @namespace    http://tampermonkey.net/
-// @version      3.2
-// @description  视频选择 + 批量提取指定分辨率直链，修复面板穿透，支持实时进度显示，支持时长统计和大小估算
-// @author       You
+// @version      3.3
+// @description  视频选择 + 批量提取指定分辨率直链，支持时长统计和大小估算
+// @author       bydbot
 // @include      https://*.hanime*.*/search*
 // @include      https://hanime*.*/search*
 // @grant        GM_xmlhttpRequest
@@ -23,399 +23,135 @@
 (function() {
     'use strict';
 
-    // ==================== 全局变量 ====================
-    let selectionMode = false;
-    let isDragging = false;
-    let startX, startY, currentX, currentY;
-    let lastSelectedIndex = -1;
-    let ctrlPressed = false;
-    let shiftPressed = false;
+    let selectionMode = false, isDragging = false;
+    let startX, startY, currentX, currentY, lastSelectedIndex = -1;
+    let ctrlPressed = false, shiftPressed = false;
+    let isBatchProcessing = false, successCount = 0, failCount = 0;
+    let currentResolution = '1080p', targetDomain = 'hanime2.top', results = [];
 
-    // 直链获取相关变量
-    let isBatchProcessing = false;
-    let processedCount = 0;
-    let successCount = 0;
-    let failCount = 0;
-    let currentResolution = '1080p';
-    let targetDomain = 'hanime2.top';
-    let results = [];
-    let abortController = null;
+    const RES_PRIORITY = ['2160p', '1080p', '720p', '480p'];
+    const CONCURRENCY = 2, TIMEOUT = 15000;
 
-    // 配置
-    const CONFIG = {
-        resolutionPriority: ['2160p', '1080p', '720p', '480p'],
-        concurrency: 2,
-        timeout: 15000
-    };
-
-    // ==================== 样式定义 ====================
     const style = document.createElement('style');
     style.textContent = `
-        /* 主按钮样式 */
         #selectorToggleBtn {
-            position: fixed;
-            top: 70px;
-            right: 20px;
-            width: 48px;
-            height: 48px;
-            border-radius: 50%;
-            background: #e63946;
-            color: white;
-            border: none;
-            cursor: pointer;
-            box-shadow: 0 2px 10px rgba(230, 57, 70, 0.5);
-            z-index: 10000;
-            font-size: 24px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            transition: all 0.3s ease;
+            position: fixed; top: 70px; right: 20px; width: 48px; height: 48px;
+            border-radius: 50%; background: #e63946; color: #fff; border: none;
+            cursor: pointer; box-shadow: 0 2px 10px rgba(230,57,70,0.5);
+            z-index: 10000; font-size: 24px;
+            display: flex; align-items: center; justify-content: center; transition: all 0.3s;
         }
-        #selectorToggleBtn:hover {
-            transform: scale(1.1);
-            background: #ff4d5a;
-        }
-        #selectorToggleBtn.active {
-            background: #333;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.5);
-        }
-
-        /* 展开面板样式 - 修复鼠标事件穿透 */
+        #selectorToggleBtn:hover { transform: scale(1.1); background: #ff4d5a; }
+        #selectorToggleBtn.active { background: #333; box-shadow: 0 2px 10px rgba(0,0,0,0.5); }
         #selectorPanel {
-            position: fixed;
-            top: 130px;
-            right: 20px;
-            background: #222;
-            color: white;
-            padding: 15px;
-            border-radius: 8px;
-            z-index: 10001;
-            box-shadow: 0 5px 20px rgba(0,0,0,0.5);
-            font-family: Arial, sans-serif;
-            min-width: 320px;
-            max-width: 380px;        /* 添加最大宽度限制 */
-            transform: translateX(400px);
-            transition: transform 0.3s ease;
-            border-left: 3px solid #e63946;
-            max-height: 80vh;
-            overflow-y: auto;
-            overflow-x: hidden;      /* 隐藏横向滚动条 */
-            pointer-events: auto;
-            word-break: break-word;  /* 防止内容撑宽 */
+            position: fixed; top: 130px; right: 20px; background: #222; color: #fff;
+            padding: 15px; border-radius: 8px; z-index: 10001;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.5); font-family: Arial, sans-serif;
+            min-width: 320px; max-width: 380px; transform: translateX(400px);
+            transition: transform 0.3s; border-left: 3px solid #e63946;
+            max-height: 80vh; overflow-y: auto; overflow-x: hidden;
+            pointer-events: auto; word-break: break-word;
         }
-        #selectorPanel.show {
-            transform: translateX(0);
-        }
-
-        /* 面板内部所有元素都要接收鼠标事件 */
-        #selectorPanel * {
-            pointer-events: auto;
-        }
-
-        /* 面板内部样式 */
+        #selectorPanel.show { transform: translateX(0); }
+        #selectorPanel * { pointer-events: auto; }
         #selectorPanel button {
-            background: #444;
-            color: white;
-            border: none;
-            padding: 8px 15px;
-            margin: 5px 2px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 14px;
-            transition: background 0.2s;
-            width: calc(50% - 6px);
-            z-index: 10002;
+            background: #444; color: #fff; border: none; padding: 8px 15px;
+            margin: 5px 2px; border-radius: 4px; cursor: pointer; font-size: 14px;
+            transition: background 0.2s; width: calc(50% - 6px);
         }
-        #selectorPanel button:hover {
-            background: #666;
-        }
-        #selectorPanel button.primary {
-            background: #e63946;
-            width: 100%;
-            margin: 5px 0;
-        }
-        #selectorPanel button.primary:hover {
-            background: #ff4d5a;
-        }
-        #selectorPanel button.full-width {
-            width: 100%;
-            margin: 5px 0;
-        }
-        #selectorPanel button.success {
-            background: #28a745;
-        }
-        #selectorPanel button.success:hover {
-            background: #34ce57;
-        }
+        #selectorPanel button:hover { background: #666; }
+        #selectorPanel button.primary { background: #e63946; width: 100%; margin: 5px 0; }
+        #selectorPanel button.primary:hover { background: #ff4d5a; }
+        #selectorPanel button.full-width { width: 100%; margin: 5px 0; }
+        #selectorPanel button.success { background: #28a745; }
+        #selectorPanel button.success:hover { background: #34ce57; }
         #selectorPanel .status {
-            margin: 15px 0 10px;
-            font-size: 14px;
-            color: #aaa;
-            text-align: center;
-            padding: 8px;
-            background: #333;
-            border-radius: 4px;
+            margin: 15px 0 10px; font-size: 14px; color: #aaa; text-align: center;
+            padding: 8px; background: #333; border-radius: 4px;
         }
-        #selectorPanel .selected-count {
-            color: #e63946;
-            font-weight: bold;
-            font-size: 24px;
-            display: block;
-        }
+        #selectorPanel .selected-count { color: #e63946; font-weight: bold; font-size: 24px; display: block; }
         #selectorPanel .panel-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 10px;
-            border-bottom: 1px solid #444;
-            padding-bottom: 8px;
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 10px; border-bottom: 1px solid #444; padding-bottom: 8px;
         }
-        #selectorPanel .panel-header span {
-            font-weight: bold;
-            color: #e63946;
-        }
+        #selectorPanel .panel-header span { font-weight: bold; color: #e63946; }
         #selectorPanel .close-btn {
-            background: transparent;
-            border: none;
-            color: #999;
-            font-size: 20px;
-            cursor: pointer;
-            padding: 0;
-            width: auto;
-            margin: 0;
+            background: transparent; border: none; color: #999; font-size: 20px;
+            cursor: pointer; padding: 0; width: auto; margin: 0;
         }
-        #selectorPanel .close-btn:hover {
-            color: white;
-            background: transparent;
-        }
-
-        /* 统计信息区域 */
+        #selectorPanel .close-btn:hover { color: #fff; background: transparent; }
         .stats-section {
-            margin: 10px 0;
-            padding: 10px;
-            background: #2a2a2a;
-            border-radius: 6px;
-            border-left: 3px solid #e63946;
+            margin: 10px 0; padding: 10px; background: #2a2a2a;
+            border-radius: 6px; border-left: 3px solid #e63946;
         }
-        .stats-row {
-            display: flex;
-            justify-content: space-between;
-            margin: 5px 0;
-            font-size: 13px;
-        }
-        .stats-row .label {
-            color: #aaa;
-        }
-        .stats-row .value {
-            color: #e63946;
-            font-weight: bold;
-        }
-        .stats-row .value.success {
-            color: #28a745;
-        }
-        .stats-divider {
-            height: 1px;
-            background: #444;
-            margin: 8px 0;
-        }
-
-        /* 直链提取区域样式 */
-        .extractor-section {
-            margin-top: 15px;
-            border-top: 1px solid #444;
-            padding-top: 15px;
-        }
-        .extractor-section h3 {
-            color: #e63946;
-            font-size: 14px;
-            margin: 0 0 10px 0;
-        }
-        .form-group {
-            margin-bottom: 10px;
-        }
-        .form-group label {
-            display: block;
-            font-size: 12px;
-            color: #aaa;
-            margin-bottom: 3px;
-        }
+        .stats-row { display: flex; justify-content: space-between; margin: 5px 0; font-size: 13px; }
+        .stats-row .label { color: #aaa; }
+        .stats-row .value { color: #e63946; font-weight: bold; }
+        .stats-row .value.success { color: #28a745; }
+        .extractor-section { margin-top: 15px; border-top: 1px solid #444; padding-top: 15px; }
+        .extractor-section h3 { color: #e63946; font-size: 14px; margin: 0 0 10px; }
+        .form-group { margin-bottom: 10px; }
+        .form-group label { display: block; font-size: 12px; color: #aaa; margin-bottom: 3px; }
         .form-group input, .form-group select {
-            width: 100%;
-            padding: 8px;
-            background: #333;
-            border: 1px solid #444;
-            color: white;
-            border-radius: 4px;
-            box-sizing: border-box;
+            width: 100%; padding: 8px; background: #333; border: 1px solid #444;
+            color: #fff; border-radius: 4px; box-sizing: border-box;
         }
-        .form-group input:focus, .form-group select:focus {
-            outline: none;
-            border-color: #e63946;
-        }
-        .progress-bar {
-            width: 100%;
-            height: 20px;
-            background: #333;
-            border-radius: 10px;
-            margin: 10px 0;
-            overflow: hidden;
-        }
+        .form-group input:focus, .form-group select:focus { outline: none; border-color: #e63946; }
+        .progress-bar { width: 100%; height: 20px; background: #333; border-radius: 10px; margin: 10px 0; overflow: hidden; }
         .progress-fill {
-            height: 100%;
-            background: #e63946;
-            width: 0%;
-            transition: width 0.3s;
-            text-align: center;
-            line-height: 20px;
-            font-size: 11px;
-            color: white;
+            height: 100%; background: #e63946; width: 0%; transition: width 0.3s;
+            text-align: center; line-height: 20px; font-size: 11px; color: #fff;
         }
-        .stats {
-            display: flex;
-            justify-content: space-between;
-            font-size: 12px;
-            color: #aaa;
-            margin: 5px 0;
-        }
-        .stats span {
-            color: #e63946;
-            font-weight: bold;
-        }
+        .stats { display: flex; justify-content: space-between; font-size: 12px; color: #aaa; margin: 5px 0; }
+        .stats span { color: #e63946; font-weight: bold; }
         .log-container {
-            max-height: 100px;
-            overflow-y: auto;
-            overflow-x: hidden;      /* 添加：隐藏横向滚动条 */
-            background: #1a1a1a;
-            border-radius: 4px;
-            padding: 8px;
-            font-size: 11px;
-            font-family: monospace;
-            margin-top: 10px;
-            border: 1px solid #444;
-            word-break: break-all;   /* 添加：强制长单词换行 */
-            white-space: pre-wrap;    /* 添加：保留格式并允许换行 */
-            width: 100%;             /* 添加：确保不超过父容器 */
-            box-sizing: border-box;   /* 添加：padding包含在宽度内 */
+            max-height: 100px; overflow-y: auto; overflow-x: hidden;
+            background: #1a1a1a; border-radius: 4px; padding: 8px;
+            font-size: 11px; font-family: monospace; margin-top: 10px;
+            border: 1px solid #444; word-break: break-all; white-space: pre-wrap;
+            width: 100%; box-sizing: border-box;
         }
-        /* 日志条目样式 - 如果没有就新建，如果有就修改 */
-        .log-item {
-            padding: 2px 0;
-            border-bottom: 1px solid #333;
-            color: #0f0;
-            word-break: break-all;   /* 添加：强制长链接换行 */
-            white-space: pre-wrap;    /* 添加：允许换行 */
-            max-width: 100%;         /* 添加：不超过容器宽度 */
-            overflow-wrap: break-word; /* 添加：现代浏览器的换行属性 */
-        }
+        .log-item { padding: 2px 0; border-bottom: 1px solid #333; color: #0f0; word-break: break-all; white-space: pre-wrap; max-width: 100%; overflow-wrap: break-word; }
         .log-item.success { color: #51cf66; }
         .log-item.error { color: #ff6b6b; }
         .log-item.warning { color: #ffd93d; }
         .log-item.info { color: #17a2b8; }
-
-        /* 视频卡片选择样式 */
         .video-item-container.selectable {
-            position: relative;
-            cursor: crosshair !important;
-            transition: all 0.2s;
-            user-select: none;
+            position: relative; cursor: crosshair !important; transition: all 0.2s; user-select: none;
         }
-        .video-item-container.selectable:hover {
-            opacity: 0.9;
-            transform: scale(1.01);
-            box-shadow: 0 0 0 2px #e63946;
-            z-index: 100;
-        }
-        .video-item-container.selected {
-            opacity: 0.8;
-            box-shadow: 0 0 0 3px #e63946, 0 0 15px rgba(230, 57, 70, 0.7);
-            border-radius: 4px;
-        }
+        .video-item-container.selectable:hover { opacity: 0.9; transform: scale(1.01); box-shadow: 0 0 0 2px #e63946; z-index: 100; }
+        .video-item-container.selected { opacity: 0.8; box-shadow: 0 0 0 3px #e63946, 0 0 15px rgba(230,57,70,0.7); border-radius: 4px; }
         .video-item-container.selected::after {
-            content: "✓";
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            background: #e63946;
-            color: white;
-            width: 28px;
-            height: 28px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: bold;
-            font-size: 18px;
-            z-index: 1000;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
-            animation: popIn 0.2s ease;
+            content: "\u2713"; position: absolute; top: 10px; left: 10px;
+            background: #e63946; color: #fff; width: 28px; height: 28px;
+            border-radius: 50%; display: flex; align-items: center; justify-content: center;
+            font-weight: bold; font-size: 18px; z-index: 1000;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.3); animation: popIn 0.2s ease;
         }
-        @keyframes popIn {
-            from { transform: scale(0); }
-            to { transform: scale(1); }
-        }
-
-        /* 拖动选框 */
+        @keyframes popIn { from { transform: scale(0); } to { transform: scale(1); } }
         #dragSelectBox {
-            position: fixed;
-            background: rgba(230, 57, 70, 0.2);
-            border: 2px solid #e63946;
-            border-radius: 2px;
-            pointer-events: none;
-            z-index: 10002;
-            box-shadow: 0 0 0 1px rgba(255,255,255,0.3);
-            display: none;
+            position: fixed; background: rgba(230,57,70,0.2); border: 2px solid #e63946;
+            border-radius: 2px; pointer-events: none; z-index: 10002;
+            box-shadow: 0 0 0 1px rgba(255,255,255,0.3); display: none;
         }
-        #dragSelectBox.show {
-            display: block;
-        }
-
-        /* 模式提示 */
+        #dragSelectBox.show { display: block; }
         .selection-mode-hint {
-            position: fixed;
-            top: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(230, 57, 70, 0.95);
-            color: white;
-            padding: 12px 30px;
-            border-radius: 40px;
-            z-index: 10001;
-            font-size: 15px;
-            font-weight: bold;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-            pointer-events: none;
-            animation: slideDown 0.3s ease;
-            border: 1px solid rgba(255,255,255,0.2);
-            backdrop-filter: blur(5px);
-            white-space: nowrap;
+            position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(230,57,70,0.95); color: #fff; padding: 12px 30px;
+            border-radius: 40px; z-index: 10001; font-size: 15px; font-weight: bold;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5); pointer-events: none;
+            animation: slideDown 0.3s ease; border: 1px solid rgba(255,255,255,0.2); white-space: nowrap;
         }
         .selection-mode-hint .key-highlight {
-            background: rgba(255,255,255,0.2);
-            padding: 2px 8px;
-            border-radius: 4px;
-            margin: 0 5px;
-            border: 1px solid rgba(255,255,255,0.3);
+            background: rgba(255,255,255,0.2); padding: 2px 8px;
+            border-radius: 4px; margin: 0 5px; border: 1px solid rgba(255,255,255,0.3);
         }
-        @keyframes slideDown {
-            from { transform: translate(-50%, -100%); opacity: 0; }
-            to { transform: translate(-50%, 0); opacity: 1; }
-        }
-
-        /* 提示气泡 */
+        @keyframes slideDown { from { transform: translate(-50%, -100%); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
         .tooltip {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            background: rgba(0,0,0,0.9);
-            color: #e63946;
-            padding: 10px 20px;
-            border-radius: 30px;
-            font-size: 14px;
-            z-index: 10002;
-            animation: fadeInOut 3s ease;
-            border: 1px solid #e63946;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
-            pointer-events: none;
+            position: fixed; bottom: 20px; right: 20px; background: rgba(0,0,0,0.9);
+            color: #e63946; padding: 10px 20px; border-radius: 30px; font-size: 14px;
+            z-index: 10002; animation: fadeInOut 3s ease;
+            border: 1px solid #e63946; box-shadow: 0 2px 10px rgba(0,0,0,0.3); pointer-events: none;
         }
         @keyframes fadeInOut {
             0% { opacity: 0; transform: translateY(10px); }
@@ -423,123 +159,58 @@
             90% { opacity: 1; transform: translateY(0); }
             100% { opacity: 0; transform: translateY(-10px); }
         }
-
-        /* 遮罩层 */
         #dragOverlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: transparent;
-            z-index: 9997;
-            display: none;
-            cursor: crosshair;
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: transparent; z-index: 9997; display: none; cursor: crosshair;
         }
-        #dragOverlay.active {
-            display: block;
-        }
+        #dragOverlay.active { display: block; }
     `;
     document.head.appendChild(style);
 
-    // ==================== UI元素创建 ====================
-
-    // 创建主按钮
+    // --- UI 元素创建 ---
     const toggleBtn = document.createElement('button');
     toggleBtn.id = 'selectorToggleBtn';
-    toggleBtn.innerHTML = '🎬';
+    toggleBtn.innerHTML = '\uD83C\uDFAC';
     document.body.appendChild(toggleBtn);
 
-    // 创建展开面板（增强版）
     const panel = document.createElement('div');
     panel.id = 'selectorPanel';
     panel.innerHTML = `
         <div class="panel-header">
-            <span>📋 视频选择器 + 直链提取</span>
-            <button class="close-btn" id="closePanelBtn">✕</button>
+            <span>\uD83D\uDCCB 视频选择器 + 直链提取</span>
+            <button class="close-btn" id="closePanelBtn">\u2715</button>
         </div>
-
-        <!-- 选择模式控制 -->
-        <button id="enterSelectionMode" class="primary">🔍 开始选择视频</button>
-        <button id="exitSelectionMode" class="full-width" style="display: none; background: #555;">✕ 退出选择模式</button>
-
-        <div class="status">
-            已选中 <span class="selected-count" id="selectedCount">0</span> 个视频
-        </div>
-
-        <!-- 新增：时长统计和大小估算区域 -->
+        <button id="enterSelectionMode" class="primary">\uD83D\uDD0D 开始选择视频</button>
+        <button id="exitSelectionMode" class="full-width" style="display:none;background:#555">\u2715 退出选择模式</button>
+        <div class="status">已选中 <span class="selected-count" id="selectedCount">0</span> 个视频</div>
         <div class="stats-section" id="durationStats">
-            <div class="stats-row">
-                <span class="label">⏱️ 总时长:</span>
-                <span class="value" id="totalDuration">00:00:00</span>
-            </div>
-            <div class="stats-row">
-                <span class="label">⚙️ 码率设置:</span>
-                <span class="value">
-                    <input type="number" id="bitrateInput" value="3000" min="100" max="10000" step="100" style="width: 70px; background: #333; color: white; border: 1px solid #444; border-radius: 3px; padding: 2px 5px;"> kbps
-                </span>
-            </div>
-            <div class="stats-row">
-                <span class="label">💾 估算大小:</span>
-                <span class="value success" id="estimatedSize">0 MB</span>
-            </div>
-            <div class="stats-row">
-                <span class="label">📊 平均每集:</span>
-                <span class="value" id="avgSizePerVideo">0 MB</span>
-            </div>
+            <div class="stats-row"><span class="label">\u23F1\uFE0F 总时长:</span><span class="value" id="totalDuration">00:00:00</span></div>
+            <div class="stats-row"><span class="label">\u2699\uFE0F 码率设置:</span><span class="value"><input type="number" id="bitrateInput" value="3000" min="100" max="10000" step="100" style="width:70px;background:#333;color:#fff;border:1px solid #444;border-radius:3px;padding:2px 5px"> kbps</span></div>
+            <div class="stats-row"><span class="label">\uD83D\uDCBE 估算大小:</span><span class="value success" id="estimatedSize">0 MB</span></div>
+            <div class="stats-row"><span class="label">\uD83D\uDCCA 平均每集:</span><span class="value" id="avgSizePerVideo">0 MB</span></div>
         </div>
-
         <button id="selectAllBtn" class="full-width">全选当前页</button>
         <button id="unselectAllBtn" class="full-width">取消全选</button>
-
-        <!-- 直链提取区域 -->
         <div class="extractor-section">
-            <h3>🎥 批量直链提取</h3>
-
-            <div class="form-group">
-                <label>替换域名:</label>
-                <input type="text" id="targetDomain" value="hanime2.top" placeholder="例如: hanime2.top">
+            <h3>\uD83C\uDFA5 批量直链提取</h3>
+            <div class="form-group"><label>替换域名:</label><input type="text" id="targetDomain" value="hanime2.top" placeholder="例如: hanime2.top"></div>
+            <div class="form-group"><label>目标分辨率:</label><select id="resolutionSelect"><option value="2160p">4K (2160p)</option><option value="1080p" selected>1080p</option><option value="720p">720p</option><option value="480p">480p</option></select></div>
+            <button id="startBatchExtract" class="primary full-width">\uD83D\uDE80 开始批量提取直链</button>
+            <button id="stopBatchExtract" class="full-width" style="background:#dc3545;display:none">\u23F9\uFE0F 停止提取</button>
+            <div class="stats"><span>进度:</span> <span id="progressStats">0/0</span></div>
+            <div class="stats"><span>成功:</span> <span id="successCount" style="color:#28a745">0</span> <span>失败:</span> <span id="failCount" style="color:#e63946">0</span></div>
+            <div class="progress-bar"><div class="progress-fill" id="progressFill">0%</div></div>
+            <div class="log-container" id="logContainer"><div class="log-item info">准备就绪，请选择视频后开始提取</div></div>
+            <div style="display:flex;gap:4px">
+                <button id="exportResultsBtn" class="success" style="flex:1;margin:5px 0">\uD83D\uDCE5 导出 JSON</button>
+                <button id="exportTxtBtn" style="flex:1;margin:5px 0;background:#17a2b8">\uD83D\uDCE5 导出 TXT</button>
             </div>
-
-            <div class="form-group">
-                <label>目标分辨率:</label>
-                <select id="resolutionSelect">
-                    <option value="2160p">4K (2160p)</option>
-                    <option value="1080p" selected>1080p</option>
-                    <option value="720p">720p</option>
-                    <option value="480p">480p</option>
-                </select>
-            </div>
-
-            <button id="startBatchExtract" class="primary full-width">🚀 开始批量提取直链</button>
-            <button id="stopBatchExtract" class="full-width" style="background: #dc3545; display: none;">⏹️ 停止提取</button>
-
-            <div class="stats">
-                <span>进度:</span> <span id="progressStats">0/0</span>
-            </div>
-            <div class="stats">
-                <span>成功:</span> <span id="successCount" style="color:#28a745;">0</span>
-                <span>失败:</span> <span id="failCount" style="color:#e63946;">0</span>
-            </div>
-
-            <div class="progress-bar">
-                <div class="progress-fill" id="progressFill" style="width: 0%;">0%</div>
-            </div>
-
-            <div class="log-container" id="logContainer">
-                <div class="log-item info">准备就绪，请选择视频后开始提取</div>
-            </div>
-
-            <button id="exportResultsBtn" class="full-width success">📥 导出结果 (JSON)</button>
         </div>
-
-        <div class="key-hint" style="font-size: 12px; color: #888; margin-top: 8px; padding-top: 8px; border-top: 1px solid #333; text-align: center;">
+        <div style="font-size:12px;color:#888;margin-top:8px;padding-top:8px;border-top:1px solid #333;text-align:center">
             <span>拖动</span> 框选 · <span>Ctrl+拖动</span> 范围反选 · <span>Shift+点击</span> 区间 · <span>ESC</span> 退出
-        </div>
-    `;
+        </div>`;
     document.body.appendChild(panel);
 
-    // 创建拖动选框、遮罩层、提示条
     const dragBox = document.createElement('div');
     dragBox.id = 'dragSelectBox';
     document.body.appendChild(dragBox);
@@ -551,830 +222,393 @@
     const hint = document.createElement('div');
     hint.className = 'selection-mode-hint';
     hint.style.display = 'none';
-    hint.innerHTML = `
-        🖱️ <span class="key-highlight">拖动</span> 框选 ·
-        <span class="key-highlight">Ctrl+拖动</span> 范围反选 ·
-        <span class="key-highlight">Shift+点击</span> 区间 ·
-        <span class="key-highlight">ESC</span> 退出
-    `;
+    hint.innerHTML = '\uD83D\uDDB1\uFE0F <span class="key-highlight">拖动</span> 框选 · <span class="key-highlight">Ctrl+拖动</span> 范围反选 · <span class="key-highlight">Shift+点击</span> 区间 · <span class="key-highlight">ESC</span> 退出';
     document.body.appendChild(hint);
 
-    // ==================== 工具函数 ====================
-
-    // 添加日志
-    function addLog(message, type = 'info') {
-        const logContainer = document.getElementById('logContainer');
-        const logItem = document.createElement('div');
-        logItem.className = `log-item ${type}`;
-        logItem.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-        logContainer.appendChild(logItem);
-        logContainer.scrollTop = logContainer.scrollHeight;
-        console.log(`[视频提取器] ${message}`);
+    // --- 工具函数 ---
+    function addLog(msg, type = 'info') {
+        const el = document.getElementById('logContainer');
+        const item = document.createElement('div');
+        item.className = `log-item ${type}`;
+        item.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+        el.appendChild(item);
+        el.scrollTop = el.scrollHeight;
     }
 
-    // 显示提示气泡
-    function showTooltip(message, duration = 3000) {
-        const tooltip = document.createElement('div');
-        tooltip.className = 'tooltip';
-        tooltip.textContent = message;
-        document.body.appendChild(tooltip);
-        setTimeout(() => tooltip.remove(), duration);
+    function showTooltip(msg, dur = 3000) {
+        const t = document.createElement('div');
+        t.className = 'tooltip';
+        t.textContent = msg;
+        document.body.appendChild(t);
+        setTimeout(() => t.remove(), dur);
     }
 
-    // 更新进度
-    function updateProgress(current, total) {
-        const percent = total > 0 ? Math.round((current / total) * 100) : 0;
-        document.getElementById('progressFill').style.width = percent + '%';
-        document.getElementById('progressFill').textContent = percent + '%';
-        document.getElementById('progressStats').textContent = `${current}/${total}`;
+    function updateProgress(cur, total) {
+        const pct = total > 0 ? Math.round(cur / total * 100) : 0;
+        const fill = document.getElementById('progressFill');
+        fill.style.width = pct + '%';
+        fill.textContent = pct + '%';
+        document.getElementById('progressStats').textContent = `${cur}/${total}`;
         document.getElementById('successCount').textContent = successCount;
         document.getElementById('failCount').textContent = failCount;
     }
 
-    // 获取所有视频元素并排序
+    function parseDuration(s) {
+        if (!s) return 0;
+        const p = s.trim().split(':').map(Number);
+        return p.length === 2 ? p[0] * 60 + p[1] : p.length === 3 ? p[0] * 3600 + p[1] * 60 + p[2] : 0;
+    }
+
+    function formatDuration(sec) {
+        const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+        const pad = n => String(n).padStart(2, '0');
+        return `${pad(h)}:${pad(m)}:${pad(s)}`;
+    }
+
+    function formatFileSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1048576) return (bytes / 1024).toFixed(2) + ' KB';
+        if (bytes < 1073741824) return (bytes / 1048576).toFixed(2) + ' MB';
+        return (bytes / 1073741824).toFixed(2) + ' GB';
+    }
+
+    function extractVideoId(url) { const m = url.match(/[?&]v=(\d+)/); return m ? m[1] : ''; }
+
+    function replaceDomain(url, domain) {
+        try { const u = new URL(url); u.hostname = domain; return u.toString(); }
+        catch { return url.replace(/https?:\/\/[^\/]+/, `https://${domain}`); }
+    }
+
     function getVideoItems() {
-        const items = Array.from(document.querySelectorAll('.video-item-container'));
-        return items.sort((a, b) => {
-            const rectA = a.getBoundingClientRect();
-            const rectB = b.getBoundingClientRect();
-            if (Math.abs(rectA.top - rectB.top) < 20) {
-                return rectA.left - rectB.left;
-            }
-            return rectA.top - rectB.top;
+        return Array.from(document.querySelectorAll('.video-item-container')).sort((a, b) => {
+            const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+            return Math.abs(ra.top - rb.top) < 20 ? ra.left - rb.left : ra.top - rb.top;
         });
     }
 
-    // 更新所有视频的可选状态
-    function updateSelectableState(enable) {
-        const items = getVideoItems();
-        items.forEach(item => {
-            if (enable) {
-                item.classList.add('selectable');
-            } else {
-                item.classList.remove('selectable', 'selected');
-            }
-        });
-    }
-
-    // 更新选择计数
     function updateSelectedCount() {
         const count = document.querySelectorAll('.video-item-container.selected').length;
         document.getElementById('selectedCount').textContent = count;
-
-        // 同时更新时长统计和大小估算
         updateDurationStats();
     }
 
-    // ==================== 新增：时长统计和大小估算功能 ====================
-
-    // 解析时长字符串（格式：MM:SS 或 HH:MM:SS）
-    function parseDuration(durationStr) {
-        if (!durationStr) return 0;
-
-        const parts = durationStr.trim().split(':').map(Number);
-        if (parts.length === 2) {
-            // MM:SS
-            return parts[0] * 60 + parts[1];
-        } else if (parts.length === 3) {
-            // HH:MM:SS
-            return parts[0] * 3600 + parts[1] * 60 + parts[2];
-        }
-        return 0;
-    }
-
-    // 格式化秒数为 HH:MM:SS
-    function formatDuration(seconds) {
-        const hours = Math.floor(seconds / 3600);
-        const minutes = Math.floor((seconds % 3600) / 60);
-        const secs = seconds % 60;
-
-        if (hours > 0) {
-            return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-        } else {
-            return `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-        }
-    }
-
-    // 格式化文件大小
-    function formatFileSize(bytes) {
-        if (bytes < 1024) return bytes + ' B';
-        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
-        if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
-        return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
-    }
-
-    // 计算文件大小（基于时长和码率）
-    function calculateFileSize(durationSeconds, bitrateKbps) {
-        // 文件大小（字节）= 时长（秒）× 码率（千比特/秒）× 1000 / 8
-        return durationSeconds * bitrateKbps * 1000 / 8;
-    }
-
-    // 获取选中视频的总时长
-    function getSelectedTotalDuration() {
-        const selectedItems = document.querySelectorAll('.video-item-container.selected');
-        let totalSeconds = 0;
-
-        selectedItems.forEach(item => {
-            const durationElement = item.querySelector('.duration');
-            if (durationElement) {
-                totalSeconds += parseDuration(durationElement.textContent);
-            }
-        });
-
-        return totalSeconds;
-    }
-
-    // 更新时长统计和大小估算
     function updateDurationStats() {
-        const totalSeconds = getSelectedTotalDuration();
-        const selectedCount = document.querySelectorAll('.video-item-container.selected').length;
-
-        // 更新总时长显示
-        document.getElementById('totalDuration').textContent = formatDuration(totalSeconds);
-
-        // 获取码率输入值
-        const bitrateInput = document.getElementById('bitrateInput');
-        const bitrateKbps = parseInt(bitrateInput.value) || 3000;
-
-        // 计算总大小
-        const totalBytes = calculateFileSize(totalSeconds, bitrateKbps);
+        const selected = document.querySelectorAll('.video-item-container.selected');
+        let totalSec = 0;
+        selected.forEach(item => {
+            const dur = item.querySelector('.duration');
+            if (dur) totalSec += parseDuration(dur.textContent);
+        });
+        document.getElementById('totalDuration').textContent = formatDuration(totalSec);
+        const bitrate = parseInt(document.getElementById('bitrateInput').value) || 3000;
+        const totalBytes = totalSec * bitrate * 1000 / 8;
         document.getElementById('estimatedSize').textContent = formatFileSize(totalBytes);
-
-        // 计算平均每集大小
-        if (selectedCount > 0) {
-            const avgBytes = totalBytes / selectedCount;
-            document.getElementById('avgSizePerVideo').textContent = formatFileSize(avgBytes);
-        } else {
-            document.getElementById('avgSizePerVideo').textContent = '0 MB';
-        }
-
-        // 可选：添加日志
-        if (selectedCount > 0 && totalSeconds > 0) {
-            addLog(`统计: ${selectedCount}个视频, 总时长 ${formatDuration(totalSeconds)}, 估算大小 ${formatFileSize(totalBytes)}`, 'info');
-        }
+        document.getElementById('avgSizePerVideo').textContent = selected.length > 0 ? formatFileSize(totalBytes / selected.length) : '0 MB';
     }
 
-    // ==================== 原有功能函数 ====================
+    function updateSelectableState(enable) {
+        getVideoItems().forEach(item => {
+            if (enable) item.classList.add('selectable');
+            else item.classList.remove('selectable', 'selected');
+        });
+    }
 
-    // 获取选中的视频链接
     function getSelectedVideoLinks() {
-        const selectedItems = document.querySelectorAll('.video-item-container.selected');
-        const links = [];
+        return [...document.querySelectorAll('.video-item-container.selected')].map(item => {
+            const link = item.querySelector('a.video-link');
+            if (!link) return null;
+            return {
+                originalUrl: link.href,
+                title: item.querySelector('.title')?.innerText.trim() || '未知标题',
+                author: item.querySelector('.subtitle a')?.innerText.trim() || '未知作者',
+                videoId: extractVideoId(link.href),
+                duration: item.querySelector('.duration')?.textContent.trim() || '00:00'
+            };
+        }).filter(Boolean);
+    }
 
-        selectedItems.forEach(item => {
-            const linkElement = item.querySelector('a.video-link');
-            const titleElement = item.querySelector('.title');
-            const subtitleElement = item.querySelector('.subtitle a');
-            const durationElement = item.querySelector('.duration');
+    function isElementInBox(el, l, t, r, b) {
+        const rect = el.getBoundingClientRect();
+        return rect.left < r && rect.right > l && rect.top < b && rect.bottom > t;
+    }
 
-            if (linkElement) {
-                links.push({
-                    originalUrl: linkElement.href,
-                    title: titleElement ? titleElement.innerText.trim() : '未知标题',
-                    author: subtitleElement ? subtitleElement.innerText.trim() : '未知作者',
-                    videoId: extractVideoId(linkElement.href),
-                    duration: durationElement ? durationElement.textContent.trim() : '00:00'
-                });
+    function handleDragSelect() {
+        const items = getVideoItems();
+        const l = Math.min(startX, currentX), t = Math.min(startY, currentY);
+        const r = Math.max(startX, currentX), b = Math.max(startY, currentY);
+        items.forEach(item => {
+            if (isElementInBox(item, l, t, r, b)) {
+                if (ctrlPressed) item.classList.toggle('selected');
+                else item.classList.add('selected');
             }
         });
+        updateSelectedCount();
+    }
 
+    function handleShiftClick(el) {
+        const items = getVideoItems();
+        const idx = items.indexOf(el);
+        if (idx === -1) return;
+        if (lastSelectedIndex !== -1 && lastSelectedIndex !== idx) {
+            const [s, e] = [Math.min(lastSelectedIndex, idx), Math.max(lastSelectedIndex, idx)];
+            for (let i = s; i <= e; i++) items[i].classList.add('selected');
+        } else {
+            el.classList.add('selected');
+        }
+        lastSelectedIndex = idx;
+        updateSelectedCount();
+    }
+
+    // 事件委托：点击视频卡片
+    document.addEventListener('click', (e) => {
+        const item = e.target.closest('.video-item-container');
+        if (!item || !selectionMode || isDragging) return;
+        if (e.target.tagName === 'A' || e.target.closest('a')) { e.preventDefault(); e.stopPropagation(); }
+        const items = getVideoItems();
+        const idx = items.indexOf(item);
+        if (shiftPressed) handleShiftClick(item);
+        else if (ctrlPressed) { item.classList.toggle('selected'); if (item.classList.contains('selected')) lastSelectedIndex = idx; }
+        else if (item.classList.contains('selected')) { item.classList.remove('selected'); if (lastSelectedIndex === idx) lastSelectedIndex = items.findIndex(i => i.classList.contains('selected')); }
+        else { item.classList.add('selected'); lastSelectedIndex = idx; }
+        updateSelectedCount();
+    }, true);
+
+    // 为视频容器添加可选标记
+    function addSelectableMarkers() {
+        getVideoItems().forEach((item, i) => { item.dataset.index = i; });
+    }
+
+    // --- 直链提取 ---
+    function extractVideoLinksFromHtml(html) {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const links = [];
+        const resMap = { '2160': '2160p', '1080': '1080p', '720': '720p', '480': '480p' };
+
+        doc.querySelectorAll('video source[src], video[src]').forEach(el => {
+            const src = el.src || el.getAttribute('src');
+            if (!src) return;
+            let res = el.getAttribute('size') || '未知';
+            for (const [k, v] of Object.entries(resMap)) {
+                if (res.includes(k) || res.includes(v)) { res = v; break; }
+            }
+            if (res === '未知') res = el.tagName === 'SOURCE' ? el.getAttribute('size') || '未知' : '未知';
+            links.push({ src, resolution: res });
+        });
         return links;
     }
 
-    // 提取视频ID
-    function extractVideoId(url) {
-        const match = url.match(/[?&]v=(\d+)/);
-        return match ? match[1] : '';
-    }
-
-    // 替换域名
-    function replaceDomain(url, newDomain) {
-        try {
-            const urlObj = new URL(url);
-            urlObj.hostname = newDomain;
-            return urlObj.toString();
-        } catch (e) {
-            return url.replace(/https?:\/\/[^\/]+/, `https://${newDomain}`);
-        }
-    }
-
-    // 检查元素是否在选框内
-    function isElementInBox(element, boxLeft, boxTop, boxRight, boxBottom) {
-        const rect = element.getBoundingClientRect();
-        return rect.left < boxRight && rect.right > boxLeft &&
-               rect.top < boxBottom && rect.bottom > boxTop;
-    }
-
-    // 处理拖动选择
-    function handleDragSelect() {
-        const items = getVideoItems();
-        const left = Math.min(startX, currentX);
-        const top = Math.min(startY, currentY);
-        const right = Math.max(startX, currentX);
-        const bottom = Math.max(startY, currentY);
-
-        items.forEach(item => {
-            const isInBox = isElementInBox(item, left, top, right, bottom);
-            if (isInBox) {
-                if (ctrlPressed) {
-                    item.classList.toggle('selected');
-                } else {
-                    item.classList.add('selected');
-                }
-            }
-        });
-        updateSelectedCount();
-    }
-
-    // 获取元素索引
-    function getElementIndex(element) {
-        const items = getVideoItems();
-        return items.indexOf(element);
-    }
-
-    // 处理Shift+点击区间选择
-    function handleShiftClick(currentElement) {
-        const items = getVideoItems();
-        const currentIndex = getElementIndex(currentElement);
-
-        if (currentIndex === -1) return;
-
-        if (lastSelectedIndex !== -1 && lastSelectedIndex !== currentIndex) {
-            const start = Math.min(lastSelectedIndex, currentIndex);
-            const end = Math.max(lastSelectedIndex, currentIndex);
-
-            for (let i = start; i <= end; i++) {
-                items[i].classList.add('selected');
-            }
-        } else {
-            currentElement.classList.add('selected');
-        }
-
-        lastSelectedIndex = currentIndex;
-        updateSelectedCount();
-    }
-
-    // 为所有视频添加点击事件
-    function addClickHandlers() {
-        const items = getVideoItems();
-        items.forEach((item, index) => {
-            const newItem = item.cloneNode(true);
-            item.parentNode.replaceChild(newItem, item);
-
-            newItem.addEventListener('click', function(e) {
-                if (e.target.tagName === 'A' || e.target.closest('a')) {
-                    if (selectionMode) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                    }
-                }
-
-                if (selectionMode && !isDragging) {
-                    if (shiftPressed) {
-                        handleShiftClick(this);
-                    } else if (ctrlPressed) {
-                        this.classList.toggle('selected');
-                        if (this.classList.contains('selected')) {
-                            lastSelectedIndex = index;
-                        }
-                    } else {
-                        if (this.classList.contains('selected')) {
-                            this.classList.remove('selected');
-                            if (lastSelectedIndex === index) {
-                                const selectedItems = items.filter(item => item.classList.contains('selected'));
-                                if (selectedItems.length > 0) {
-                                    lastSelectedIndex = getElementIndex(selectedItems[0]);
-                                } else {
-                                    lastSelectedIndex = -1;
-                                }
-                            }
-                        } else {
-                            this.classList.add('selected');
-                            lastSelectedIndex = index;
-                        }
-                    }
-                    updateSelectedCount();
-                }
-            });
-
-            newItem.dataset.index = index;
-        });
-    }
-
-    // ==================== 直链提取功能 ====================
-
-    // 从HTML中提取视频链接
-    function extractVideoLinksFromHtml(html, url) {
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(html, 'text/html');
-        const videoLinks = [];
-
-        // 查找video标签下的source
-        const videos = doc.querySelectorAll('video');
-        videos.forEach((video, videoIndex) => {
-            const sources = video.querySelectorAll('source[src]');
-            sources.forEach((source, sourceIndex) => {
-                const src = source.src;
-                if (!src) return;
-
-                let resolution = source.getAttribute('size') || '未知';
-                if (resolution === '未知' && video.videoWidth && video.videoHeight) {
-                    resolution = `${video.videoWidth}x${video.videoHeight}`;
-                }
-
-                // 标准化分辨率格式
-                if (resolution.includes('2160') || resolution.includes('4K')) resolution = '2160p';
-                else if (resolution.includes('1080') || resolution.includes('1920x1080')) resolution = '1080p';
-                else if (resolution.includes('720') || resolution.includes('1280x720')) resolution = '720p';
-                else if (resolution.includes('480') || resolution.includes('854x480')) resolution = '480p';
-
-                videoLinks.push({
-                    src: src,
-                    resolution: resolution,
-                    index: videoLinks.length
-                });
-            });
-        });
-
-        // 如果没找到，尝试查找直接的video src
-        if (videoLinks.length === 0) {
-            const videoElements = doc.querySelectorAll('video[src]');
-            videoElements.forEach(video => {
-                videoLinks.push({
-                    src: video.src,
-                    resolution: '未知',
-                    index: videoLinks.length
-                });
-            });
-        }
-
-        return videoLinks;
-    }
-
-    // 根据优先级选择最佳分辨率
-    function selectBestResolution(links, preferredResolution) {
-        if (!links || links.length === 0) return null;
-
-        // 先找首选分辨率
-        const exactMatch = links.find(link =>
-            link.resolution.includes(preferredResolution) ||
-            (preferredResolution === '2160p' && link.resolution.includes('4K'))
-        );
-        if (exactMatch) return exactMatch;
-
-        // 按优先级降级查找
-        const priority = CONFIG.resolutionPriority;
-        const preferredIndex = priority.indexOf(preferredResolution);
-
-        for (let i = preferredIndex + 1; i < priority.length; i++) {
-            const res = priority[i];
-            const match = links.find(link =>
-                link.resolution.includes(res) ||
-                (res === '2160p' && link.resolution.includes('4K'))
-            );
+    function selectBestResolution(links, preferred) {
+        if (!links.length) return null;
+        // 精确匹配
+        const exact = links.find(l => l.resolution.includes(preferred) || (preferred === '2160p' && l.resolution.includes('4K')));
+        if (exact) return exact;
+        // 降级查找
+        for (const res of RES_PRIORITY.slice(RES_PRIORITY.indexOf(preferred) + 1)) {
+            const match = links.find(l => l.resolution.includes(res));
             if (match) return match;
         }
-
-        // 如果都没有，返回第一个
         return links[0];
     }
 
-    // 获取单个视频的链接（带重试）
-    async function fetchVideoLinks(item, preferredResolution, retryCount = 2) {
-        for (let attempt = 0; attempt <= retryCount; attempt++) {
+    async function fetchVideoLinks(item, preferred, retries = 2) {
+        for (let attempt = 0; attempt <= retries; attempt++) {
             try {
-                if (attempt > 0) {
-                    addLog(`重试 (${attempt}/${retryCount}): ${item.title}`, 'warning');
-                    await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
-                }
+                if (attempt > 0) { addLog(`重试 (${attempt}/${retries}): ${item.title}`, 'warning'); await new Promise(r => setTimeout(r, 1000 * attempt)); }
 
                 const response = await new Promise((resolve, reject) => {
                     GM_xmlhttpRequest({
-                        method: 'GET',
-                        url: item.newUrl,
-                        timeout: CONFIG.timeout,
+                        method: 'GET', url: item.newUrl, timeout: TIMEOUT,
                         onload: resolve,
-                        onerror: (err) => {
-                            // 处理权限错误
-                            if (err.error === 'NOT_ALLOWED' || (err.responseText && err.responseText.includes('not allowed'))) {
-                                reject(new Error(`⛔ 域名 ${new URL(item.newUrl).hostname} 未授权，请在Tampermonkey中允许访问该域名`));
-                            } else if (err.error === 'NETWORK_ERROR') {
-                                reject(new Error(`网络错误，请检查网络连接`));
-                            } else if (err.status === 0) {
-                                reject(new Error(`跨域请求被阻止，请确保域名 ${new URL(item.newUrl).hostname} 已添加到 @connect 或已被用户允许`));
-                            } else {
-                                reject(err);
-                            }
-                        },
-                        ontimeout: () => {
-                            reject(new Error(`请求超时 (${CONFIG.timeout}ms)`));
-                        }
+                        onerror: err => reject(new Error(err.error === 'NOT_ALLOWED' || err.responseText?.includes('not allowed')
+                            ? `\u26D4 域名 ${new URL(item.newUrl).hostname} 未授权，请在Tampermonkey中允许`
+                            : err.status === 0 ? `跨域被阻止，请确保 ${new URL(item.newUrl).hostname} 已添加到 @connect`
+                            : '网络错误，请检查连接')),
+                        ontimeout: () => reject(new Error(`请求超时 (${TIMEOUT}ms)`))
                     });
                 });
 
-                if (response.status !== 200) {
-                    throw new Error(`HTTP ${response.status} - ${response.statusText || '未知错误'}`);
+                if (response.status !== 200) throw new Error(`HTTP ${response.status}`);
+
+                const links = extractVideoLinksFromHtml(response.responseText);
+                if (links.length) {
+                    const best = selectBestResolution(links, preferred);
+                    if (best) { addLog(`\u2705 ${item.title} [${best.resolution}]`, 'success'); return { ...item, videoUrl: best.src, resolution: best.resolution, allLinks: links }; }
                 }
-
-                const links = extractVideoLinksFromHtml(response.responseText, item.newUrl);
-
-                if (links.length > 0) {
-                    addLog(`找到 ${links.length} 个视频流: ${item.title}`, 'info');
-                    const bestLink = selectBestResolution(links, preferredResolution);
-
-                    if (bestLink) {
-                        addLog(`选择分辨率: ${bestLink.resolution}`, 'success');
-                        return {
-                            ...item,
-                            videoUrl: bestLink.src,
-                            resolution: bestLink.resolution,
-                            allLinks: links
-                        };
-                    }
-                }
-
-                addLog(`未找到视频流: ${item.title}`, 'warning');
-                return {
-                    ...item,
-                    videoUrl: null,
-                    resolution: null,
-                    error: '未找到视频流',
-                    allLinks: []
-                };
-
-            } catch (error) {
-                // 更详细的错误日志
-                let errorMessage = error.message;
-
-                // 处理特定错误类型
-                if (errorMessage.includes('not allowed') || errorMessage.includes('未授权')) {
-                    addLog(`❌ 权限错误: ${errorMessage}`, 'error');
-                    // 提示用户如何解决
-                    addLog(`💡 提示: 如果这是新域名，请在Tampermonkey弹出的权限请求中选择"始终允许"`, 'warning');
-                } else if (errorMessage.includes('超时')) {
-                    addLog(`⏱️ 超时: ${item.title}`, 'error');
-                } else {
-                    addLog(`❌ 请求失败 (${attempt + 1}/${retryCount + 1}): ${item.title} - ${errorMessage}`, 'error');
-                }
-
-                if (attempt === retryCount) {
-                    return {
-                        ...item,
-                        videoUrl: null,
-                        resolution: null,
-                        error: error.message,
-                        allLinks: []
-                    };
-                }
+                addLog(`\u26A0\uFE0F 未找到视频流: ${item.title}`, 'warning');
+                return { ...item, videoUrl: null, resolution: null, error: '未找到视频流', allLinks: [] };
+            } catch (err) {
+                addLog(`\u274C ${item.title} - ${err.message}`, 'error');
+                if (attempt === retries) return { ...item, videoUrl: null, resolution: null, error: err.message, allLinks: [] };
             }
         }
-        return null;
     }
 
-    // 批量获取视频链接（带并发控制）
-    async function batchFetchVideoLinks(items, preferredResolution) {
-        const results = [];
-        const total = items.length;
+    async function batchFetchVideoLinks(items, preferred) {
+        const out = [];
         let completed = 0;
-
+        const total = items.length;
         updateProgress(0, total);
         addLog(`开始批量提取 ${total} 个视频...`);
 
-        // 并发控制
-        for (let i = 0; i < items.length; i += CONFIG.concurrency) {
-            if (!isBatchProcessing) break;
-
-            const batch = items.slice(i, i + CONFIG.concurrency);
-            const promises = batch.map(item => fetchVideoLinks(item, preferredResolution));
-
-            const batchResults = await Promise.all(promises);
-
-            batchResults.forEach(result => {
-                results.push(result);
-                if (result.videoUrl) {
-                    successCount++;
-                } else {
-                    failCount++;
-                }
-            });
-
+        for (let i = 0; i < items.length && isBatchProcessing; i += CONCURRENCY) {
+            const batch = items.slice(i, i + CONCURRENCY);
+            const batchResults = await Promise.all(batch.map(item => fetchVideoLinks(item, preferred)));
+            batchResults.forEach(r => { out.push(r); r.videoUrl ? successCount++ : failCount++; });
             completed += batch.length;
             updateProgress(completed, total);
-
-            // 批次间延时
-            if (i + CONFIG.concurrency < items.length && isBatchProcessing) {
-                await new Promise(resolve => setTimeout(resolve, 800));
-            }
+            if (i + CONCURRENCY < items.length && isBatchProcessing) await new Promise(r => setTimeout(r, 800));
         }
-
         addLog(`提取完成: 成功 ${successCount}/${total}`, 'success');
-        return results;
+        return out;
     }
 
-    // 开始批量处理
     async function startBatchProcessing() {
-        const selectedLinks = getSelectedVideoLinks();
-
-        if (selectedLinks.length === 0) {
-            showTooltip('⚠️ 请先选择视频');
-            return;
-        }
-
-        // 获取配置
+        const links = getSelectedVideoLinks();
+        if (!links.length) { showTooltip('\u26A0\uFE0F 请先选择视频'); return; }
         targetDomain = document.getElementById('targetDomain').value.trim();
         currentResolution = document.getElementById('resolutionSelect').value;
+        if (!targetDomain) { showTooltip('\u26A0\uFE0F 请输入替换域名'); return; }
 
-        if (!targetDomain) {
-            showTooltip('⚠️ 请输入替换域名');
-            return;
-        }
-
-        // 重置状态
-        isBatchProcessing = true;
-        processedCount = 0;
-        successCount = 0;
-        failCount = 0;
-        results = [];
-        abortController = new AbortController();
-
-        // 更新UI
+        isBatchProcessing = true; successCount = 0; failCount = 0; results = [];
         document.getElementById('startBatchExtract').style.display = 'none';
         document.getElementById('stopBatchExtract').style.display = 'block';
         document.getElementById('logContainer').innerHTML = '';
+        addLog(`目标: ${targetDomain} | 分辨率: ${currentResolution} | ${links.length}个视频`, 'info');
 
-        addLog(`开始批量提取，共 ${selectedLinks.length} 个视频`, 'info');
-        addLog(`目标域名: ${targetDomain}`, 'info');
-        addLog(`目标分辨率: ${currentResolution}`, 'info');
-
-        // 准备处理项
-        const items = selectedLinks.map(item => ({
-            ...item,
-            newUrl: replaceDomain(item.originalUrl, targetDomain)
-        }));
-
-        // 批量处理
-        results = await batchFetchVideoLinks(items, currentResolution);
-
-        // 处理完成
+        results = await batchFetchVideoLinks(links.map(l => ({ ...l, newUrl: replaceDomain(l.originalUrl, targetDomain) })), currentResolution);
         isBatchProcessing = false;
         document.getElementById('startBatchExtract').style.display = 'block';
         document.getElementById('stopBatchExtract').style.display = 'none';
-
-        addLog(`批量处理完成！成功: ${successCount}, 失败: ${failCount}`, 'info');
-        showTooltip(`✅ 批量处理完成，成功: ${successCount}, 失败: ${failCount}`);
+        addLog(`完成！成功: ${successCount}, 失败: ${failCount}`, 'info');
+        showTooltip(`\u2705 完成，成功: ${successCount}, 失败: ${failCount}`);
     }
 
-    // 停止批量处理
     function stopBatchProcessing() {
         isBatchProcessing = false;
-        if (abortController) {
-            abortController.abort();
-        }
         document.getElementById('startBatchExtract').style.display = 'block';
         document.getElementById('stopBatchExtract').style.display = 'none';
-        addLog('⏹️ 已手动停止提取', 'warning');
+        addLog('\u23F9\uFE0F 已手动停止', 'warning');
     }
 
-    // 导出结果
     function exportResults() {
-        if (results.length === 0) {
-            showTooltip('⚠️ 没有可导出的数据');
-            return;
-        }
-
-        const urlParams = new URLSearchParams(window.location.search);
-        const query = urlParams.get('query') || 'video';
+        if (!results.length) { showTooltip('\u26A0\uFE0F 没有可导出的数据'); return; }
+        const query = new URLSearchParams(location.search).get('query') || 'video';
         const filename = `${query}_${currentResolution}_${results.length}.json`;
-
-        // 构建导出数据结构
-        const exportData = {
-            query: query,
-            resolution: currentResolution,
-            targetDomain: targetDomain,
-            totalCount: results.length,
-            successCount: successCount,
-            failCount: failCount,
+        const blob = new Blob([JSON.stringify({
+            query, resolution: currentResolution, targetDomain,
+            totalCount: results.length, successCount, failCount,
             timestamp: new Date().toISOString(),
-            results: results.map(item => ({
-                title: item.title,
-                author: item.author,
-                videoId: item.videoId,
-                duration: item.duration,
-                originalUrl: item.originalUrl,
-                convertedUrl: item.newUrl,
-                videoUrl: item.videoUrl,
-                resolution: item.resolution,
-                error: item.error
-            }))
-        };
-
-        const dataStr = JSON.stringify(exportData, null, 2);
-        const blob = new Blob([dataStr], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
+            results: results.map(r => ({ title: r.title, author: r.author, videoId: r.videoId, duration: r.duration, originalUrl: r.originalUrl, convertedUrl: r.newUrl, videoUrl: r.videoUrl, resolution: r.resolution, error: r.error }))
+        }, null, 2)], { type: 'application/json' });
         const a = document.createElement('a');
-        a.href = url;
+        a.href = URL.createObjectURL(blob);
         a.download = filename;
         a.click();
-        URL.revokeObjectURL(url);
-
-        addLog(`✅ 已导出 ${results.length} 条结果到 ${filename}`, 'success');
-        showTooltip(`✅ 已保存到 ${filename}`);
+        URL.revokeObjectURL(a.href);
+        addLog(`\u2705 已导出 ${results.length} 条到 ${filename}`, 'success');
+        showTooltip(`\u2705 已保存到 ${filename}`);
     }
 
-    // ==================== 事件绑定 ====================
+    function exportTxt() {
+        if (!results.length) { showTooltip('\u26A0\uFE0F 没有可导出的数据'); return; }
+        const urls = results.filter(r => r.videoUrl).map(r => r.videoUrl);
+        if (!urls.length) { showTooltip('\u26A0\uFE0F 没有成功的视频链接'); return; }
+        const query = new URLSearchParams(location.search).get('query') || 'video';
+        const filename = `${query}_${currentResolution}_${urls.length}.txt`;
+        const blob = new Blob([urls.join('\n')], { type: 'text/plain' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        addLog(`\u2705 已导出 ${urls.length} 条直链到 ${filename}`, 'success');
+        showTooltip(`\u2705 已保存到 ${filename}`);
+    }
 
-    // 初始化点击事件
-    addClickHandlers();
+    // --- 事件绑定 ---
+    // 阻止冒泡辅助
+    const stop = fn => e => { e.stopPropagation(); fn(e); };
 
-    // 键盘事件
-    document.addEventListener('keydown', (e) => {
-        ctrlPressed = e.ctrlKey;
-        shiftPressed = e.shiftKey;
+    addSelectableMarkers();
 
+    // 键盘
+    document.addEventListener('keydown', e => {
+        ctrlPressed = e.ctrlKey; shiftPressed = e.shiftKey;
         if (e.key === 'Escape') {
-            if (selectionMode) {
-                document.getElementById('exitSelectionMode').click();
-            }
-            if (panel.classList.contains('show')) {
-                panel.classList.remove('show');
-                toggleBtn.classList.remove('active');
-            }
-            if (isBatchProcessing) {
-                stopBatchProcessing();
-            }
+            if (selectionMode) document.getElementById('exitSelectionMode').click();
+            if (panel.classList.contains('show')) { panel.classList.remove('show'); toggleBtn.classList.remove('active'); }
+            if (isBatchProcessing) stopBatchProcessing();
         }
     });
+    document.addEventListener('keyup', e => { ctrlPressed = e.ctrlKey; shiftPressed = e.shiftKey; });
+    window.addEventListener('blur', () => { ctrlPressed = false; shiftPressed = false; });
 
-    document.addEventListener('keyup', (e) => {
-        ctrlPressed = e.ctrlKey;
-        shiftPressed = e.shiftKey;
+    // 拖动选择
+    document.addEventListener('mousedown', e => {
+        if (!selectionMode || e.target.closest('#selectorToggleBtn,#selectorPanel,.video-item-container')) return;
+        isDragging = true; startX = currentX = e.clientX; startY = currentY = e.clientY;
+        Object.assign(dragBox.style, { left: startX + 'px', top: startY + 'px', width: '0px', height: '0px' });
+        dragBox.classList.add('show'); overlay.classList.add('active');
     });
-
-    window.addEventListener('blur', () => {
-        ctrlPressed = false;
-        shiftPressed = false;
-    });
-
-    // 鼠标拖动事件
-    document.addEventListener('mousedown', (e) => {
-        if (!selectionMode) return;
-        if (e.target.closest('#selectorToggleBtn') || e.target.closest('#selectorPanel')) return;
-        if (e.target.closest('.video-item-container')) return;
-
-        isDragging = true;
-        startX = e.clientX;
-        startY = e.clientY;
-        currentX = startX;
-        currentY = startY;
-
-        dragBox.style.left = startX + 'px';
-        dragBox.style.top = startY + 'px';
-        dragBox.style.width = '0px';
-        dragBox.style.height = '0px';
-        dragBox.classList.add('show');
-
-        overlay.classList.add('active');
-    });
-
-    document.addEventListener('mousemove', (e) => {
+    document.addEventListener('mousemove', e => {
         if (!isDragging || !selectionMode) return;
-
-        currentX = e.clientX;
-        currentY = e.clientY;
-
-        const left = Math.min(startX, currentX);
-        const top = Math.min(startY, currentY);
-        const width = Math.abs(currentX - startX);
-        const height = Math.abs(currentY - startY);
-
-        dragBox.style.left = left + 'px';
-        dragBox.style.top = top + 'px';
-        dragBox.style.width = width + 'px';
-        dragBox.style.height = height + 'px';
+        currentX = e.clientX; currentY = e.clientY;
+        Object.assign(dragBox.style, {
+            left: Math.min(startX, currentX) + 'px', top: Math.min(startY, currentY) + 'px',
+            width: Math.abs(currentX - startX) + 'px', height: Math.abs(currentY - startY) + 'px'
+        });
+    });
+    document.addEventListener('mouseup', () => {
+        if (isDragging && selectionMode) handleDragSelect();
+        isDragging = false; dragBox.classList.remove('show'); overlay.classList.remove('active');
     });
 
-    document.addEventListener('mouseup', (e) => {
-        if (isDragging && selectionMode) {
-            handleDragSelect();
-        }
+    // 面板阻止冒泡
+    ['mousedown', 'mouseup', 'click'].forEach(evt => panel.addEventListener(evt, e => e.stopPropagation()));
 
-        isDragging = false;
-        dragBox.classList.remove('show');
-        overlay.classList.remove('active');
-    });
+    // 按钮事件
+    toggleBtn.addEventListener('click', stop(() => { panel.classList.toggle('show'); toggleBtn.classList.toggle('active'); }));
+    document.getElementById('closePanelBtn').addEventListener('click', stop(() => { panel.classList.remove('show'); toggleBtn.classList.remove('active'); }));
 
-    // 面板上的鼠标事件处理 - 阻止事件传播
-    panel.addEventListener('mousedown', (e) => e.stopPropagation());
-    panel.addEventListener('mouseup', (e) => e.stopPropagation());
-    panel.addEventListener('click', (e) => e.stopPropagation());
-
-    // 切换面板显示
-    toggleBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        panel.classList.toggle('show');
-        toggleBtn.classList.toggle('active');
-    });
-
-    // 关闭面板
-    document.getElementById('closePanelBtn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        panel.classList.remove('show');
-        toggleBtn.classList.remove('active');
-    });
-
-    // 进入选择模式
-    document.getElementById('enterSelectionMode').addEventListener('click', (e) => {
-        e.stopPropagation();
-        selectionMode = true;
-        lastSelectedIndex = -1;
-        updateSelectableState(true);
+    document.getElementById('enterSelectionMode').addEventListener('click', stop(() => {
+        selectionMode = true; lastSelectedIndex = -1; updateSelectableState(true);
         document.getElementById('enterSelectionMode').style.display = 'none';
         document.getElementById('exitSelectionMode').style.display = 'block';
-        hint.style.display = 'block';
-        updateSelectedCount();
-        showTooltip('✨ 选择模式已开启');
+        hint.style.display = 'block'; updateSelectedCount(); showTooltip('\u2728 选择模式已开启');
+        setTimeout(() => { panel.classList.remove('show'); toggleBtn.classList.remove('active'); }, 500);
+    }));
 
-        setTimeout(() => {
-            panel.classList.remove('show');
-            toggleBtn.classList.remove('active');
-        }, 500);
-    });
-
-    // 退出选择模式
-    document.getElementById('exitSelectionMode').addEventListener('click', (e) => {
-        e.stopPropagation();
-        selectionMode = false;
-        lastSelectedIndex = -1;
-        isDragging = false;
-        dragBox.classList.remove('show');
-        overlay.classList.remove('active');
+    document.getElementById('exitSelectionMode').addEventListener('click', stop(() => {
+        selectionMode = false; lastSelectedIndex = -1; isDragging = false;
+        dragBox.classList.remove('show'); overlay.classList.remove('active');
         updateSelectableState(false);
         document.getElementById('enterSelectionMode').style.display = 'block';
         document.getElementById('exitSelectionMode').style.display = 'none';
-        hint.style.display = 'none';
-        showTooltip('选择模式已关闭');
-    });
+        hint.style.display = 'none'; showTooltip('选择模式已关闭');
+    }));
 
-    // 全选
-    document.getElementById('selectAllBtn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (!selectionMode) {
-            showTooltip('⚠️ 请先进入选择模式');
-            return;
-        }
-        const items = getVideoItems();
-        items.forEach(item => item.classList.add('selected'));
-        if (items.length > 0) {
-            lastSelectedIndex = items.length - 1;
-        }
-        updateSelectedCount();
-        showTooltip(`✅ 已全选 ${items.length} 个视频`);
-    });
+    document.getElementById('selectAllBtn').addEventListener('click', stop(() => {
+        if (!selectionMode) { showTooltip('\u26A0\uFE0F 请先进入选择模式'); return; }
+        const items = getVideoItems(); items.forEach(i => i.classList.add('selected'));
+        lastSelectedIndex = items.length - 1; updateSelectedCount();
+        showTooltip(`\u2705 已全选 ${items.length} 个视频`);
+    }));
 
-    // 取消全选
-    document.getElementById('unselectAllBtn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (!selectionMode) {
-            showTooltip('⚠️ 请先进入选择模式');
-            return;
-        }
-        getVideoItems().forEach(item => item.classList.remove('selected'));
-        lastSelectedIndex = -1;
-        updateSelectedCount();
-        showTooltip('已取消全选');
-    });
+    document.getElementById('unselectAllBtn').addEventListener('click', stop(() => {
+        if (!selectionMode) { showTooltip('\u26A0\uFE0F 请先进入选择模式'); return; }
+        getVideoItems().forEach(i => i.classList.remove('selected'));
+        lastSelectedIndex = -1; updateSelectedCount(); showTooltip('已取消全选');
+    }));
 
-    // 开始批量提取
-    document.getElementById('startBatchExtract').addEventListener('click', (e) => {
-        e.stopPropagation();
-        startBatchProcessing();
-    });
+    document.getElementById('startBatchExtract').addEventListener('click', stop(() => startBatchProcessing()));
+    document.getElementById('stopBatchExtract').addEventListener('click', stop(() => stopBatchProcessing()));
+    document.getElementById('exportResultsBtn').addEventListener('click', stop(() => exportResults()));
+    document.getElementById('exportTxtBtn').addEventListener('click', stop(() => exportTxt()));
+    document.getElementById('bitrateInput').addEventListener('input', stop(() => updateDurationStats()));
 
-    // 停止批量提取
-    document.getElementById('stopBatchExtract').addEventListener('click', (e) => {
-        e.stopPropagation();
-        stopBatchProcessing();
-    });
-
-    // 导出结果
-    document.getElementById('exportResultsBtn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        exportResults();
-    });
-
-    // 码率输入变化时更新估算大小
-    document.getElementById('bitrateInput').addEventListener('input', (e) => {
-        e.stopPropagation();
-        updateDurationStats();
-    });
-
-    // 点击页面其他地方关闭面板
-    document.addEventListener('click', (e) => {
+    document.addEventListener('click', e => {
         if (!panel.contains(e.target) && !toggleBtn.contains(e.target) && panel.classList.contains('show')) {
-            panel.classList.remove('show');
-            toggleBtn.classList.remove('active');
+            panel.classList.remove('show'); toggleBtn.classList.remove('active');
         }
     });
-
-    console.log('修复版视频选择器+直链提取器 v3.2 已加载 (支持时长统计和大小估算)');
 })();
